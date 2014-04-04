@@ -1,0 +1,304 @@
+#!/usr/bin/ruby
+OBJC = <<-__EOBJC__
+
+#import "PromiseKit+CommonCrypto.h"
+#import "PromiseKit/Deferred.h"
+#import "PromiseKit+Foundation.h"
+#import "PromiseKit/Promise.h"
+#import <XCTest/XCTest.h>
+    
+#define URL @"http://localhost:61231"
+#define wait(t) [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:t]]
+
+int main() {
+    @autoreleasepool {
+        XCTSelfTestMain();
+    }
+}
+
+@interface Tests : XCTestCase {
+    Deferred *d;
+    __block BOOL resolved;
+    __block BOOL failme;
+}
+@end
+
+
+@implementation Tests
+
+- (void)setUp {
+    [super setUp];
+    d = [Deferred new];
+}
+
+
+- (void)test_01_resolve {
+    d.promise.then(^(NSNumber *o){
+        resolved = YES;
+        XCTAssertEqual(o.intValue, 1);
+    });
+    d.promise.fail(^{
+        XCTFail();
+    });
+    [d resolve:@1];
+    XCTAssertTrue(resolved);
+}
+
+- (void)test_02_reject {
+    d.promise.then(^{
+        XCTFail();
+    });
+    d.promise.fail(^{
+        resolved = YES;
+    });
+    [d reject:@1];
+    XCTAssertTrue(resolved);
+}
+
+- (void)test_03_throw {
+    d.promise.then(^{
+        @throw @1;
+    }).fail(^(NSError *e){
+        resolved = YES;
+        XCTAssertEqualObjects(@1, e.userInfo[PMKThrown]);
+    });
+    d.promise.fail(^{
+        XCTFail();
+    });
+    [d resolve:@1];
+    XCTAssertTrue(resolved);
+}
+
+- (void)test_04_throw_doesnt_compromise_result {
+    Promise *nextPromise = d.promise.then(^{
+        @throw @1;
+    });
+    [d resolve:@1];
+
+    nextPromise.then(^{
+        failme = YES;
+    });
+    nextPromise.fail(^{
+        resolved = YES;
+    });
+
+    XCTAssertTrue(resolved);
+    XCTAssertFalse(failme);
+}
+
+- (void)test_05_throw_and_bubble {
+    d.promise.then(^{
+        @throw @1;
+    }).fail(^{
+        resolved = YES;
+    });
+    [d resolve:@1];
+    XCTAssertTrue(resolved);
+}
+
+- (void)test_05_throw_and_bubble_more {
+    d.promise.then(^{
+        @throw @1;
+    }).then(^{
+        //NOOP
+    }).fail(^{
+        resolved = YES;
+    });
+    [d resolve:@1];
+    XCTAssertTrue(resolved);
+}
+
+- (void)test_06_return_error {
+    d.promise.then(^{
+        return [NSError new];
+    }).fail(^{
+        resolved = YES;
+    });
+    [d resolve:@1];
+    XCTAssertTrue(resolved);
+}
+
+- (void)test_07_can_then_resolved {
+    [d resolve:@1];
+    d.promise.then(^(id o){
+        resolved = YES;
+        XCTAssertEqualObjects(@1, o);
+    });
+    XCTAssertTrue(resolved);
+}
+
+- (void)test_07a_can_fail_rejected {
+    [d reject:@1];
+    d.promise.fail(^(NSError *e){
+        resolved = YES;
+        XCTAssertEqualObjects(@1, e.userInfo[PMKThrown]);
+    });
+    XCTAssertTrue(resolved);
+}
+
+- (void)test_08_url_connection {
+    [NSURLConnection GET:URL].then(^{
+        resolved = YES;
+    });
+
+    wait(0.1);
+
+    XCTAssertTrue(resolved);    
+}
+
+- (void)test_09_async {
+    __block int x = 0;
+    [NSURLConnection GET:URL].then(^{
+        XCTAssertEqual(x, 0);
+        x++;
+    }).then(^{
+        XCTAssertEqual(x, 1);
+        x++;
+    });
+    wait(0.1);
+    XCTAssertEqual(x, 2);
+}
+
+- (void)test_10_then_returns_resolved_promise {
+    d.promise.then(^{
+        Deferred *d = [Deferred new];
+        [d resolve:@1];
+        return d.promise;
+    }).then(^(id o){
+        XCTAssertEqualObjects(@1, o);
+        resolved = YES;
+    });
+    [d resolve:@1];
+    XCTAssertTrue(resolved);
+}
+
+- (void)test_11_then_returns_unresolved_promise {
+    d.promise.then(^{
+        return [NSURLConnection GET:URL];
+    }).then(^(id o){
+        o = [[NSString alloc] initWithData:o encoding:NSUTF8StringEncoding];
+        XCTAssertEqualObjects(@"hi", o);
+        resolved = YES;
+    });
+    [d resolve:@1];
+    wait(0.2);
+    XCTAssertTrue(resolved);
+}
+
+- (void)test_12_then_returns_recursive_promises {
+    __block int x = 0;
+    [NSURLConnection GET:URL].then(^{
+        XCTAssertEqual(x, 0);
+        x++;
+        return [NSURLConnection GET:URL].then(^{
+            XCTAssertEqual(x, 1);
+            x++;
+            return [NSURLConnection GET:URL].then(^{
+                XCTAssertEqual(x, 2);
+                x++;
+                return [NSURLConnection GET:URL].then(^{
+                    XCTAssertEqual(x, 3);
+                    x++;
+                });
+            });
+        });
+    }).then(^{
+        XCTAssertEqual(x, 4);
+        x++;
+    });
+    wait(0.2);
+    XCTAssertEqual(x, 5);
+}
+
+- (void)test_13_then_returns_recursive_promises_that_fails {
+    [NSURLConnection GET:URL].then(^{
+        return [NSURLConnection GET:URL].then(^{
+            return [NSURLConnection GET:URL].then(^{
+                return [NSURLConnection GET:URL].then(^{
+                    @throw @1;
+                });
+            });
+        });
+    }).then(^{
+        XCTFail();
+    }).fail(^{
+        resolved = YES;
+    });
+    wait(0.2);
+    XCTAssertTrue(resolved);
+}
+
+- (void)test_14_fail_returns_value {
+    d.promise.then(^{
+        @throw @1;
+    }).fail(^{
+        return @2;
+    }).then(^(id o){
+        XCTAssertEqualObjects(o, @2);
+        resolved = YES;
+    });
+    [d resolve:@1];
+    XCTAssertTrue(resolved);
+}
+
+- (void)test_15_fail_returns_promise {
+    d.promise.then(^{
+        @throw @1;
+    }).fail(^{
+        return [NSURLConnection GET:URL];
+    }).then(^(id o){
+        o = [[NSString alloc] initWithData:o encoding:NSUTF8StringEncoding];
+        XCTAssertEqualObjects(o, @"hi");
+        resolved = YES;
+    });
+    [d resolve:@1];
+    wait(0.1);
+    XCTAssertTrue(resolved);
+}
+
+- (void)test_16_yolo_resolve {
+    Deferred *d = [Deferred new];
+    d.promise.yolo(^{
+        resolved = YES;
+    });
+    [d resolve:@1];
+    XCTAssertTrue(resolved);
+}
+
+- (void)test_17_yolo_reject {
+    Deferred *d = [Deferred new];
+    d.promise.yolo(^{
+        resolved = YES;
+    });
+    [d reject:@1];
+    XCTAssertTrue(resolved);
+}
+
+- (void)test_18_when {
+    id a = [NSURLConnection GET:URL];
+    id b = [NSURLConnection GET:URL];
+    [Promise when:@[a, b]].then(^(NSArray *objs){
+        XCTAssertEqual(objs.count, 2ul);
+        XCTAssertEqualObjects(objs[0], objs[1]);
+        resolved = YES;
+    });
+    wait(0.2);
+    XCTAssertTrue(resolved);
+}
+
+- (void)test_19_md5 {
+    [Promise md5:@"hi"].then(^(id md5){
+        XCTAssertEqualObjects(md5, @"49F68A5C8493EC2C0BF489821C21FC3B");
+        resolved = YES;
+    });
+    wait(0.1);
+    XCTAssertTrue(resolved);
+}
+
+@end
+
+
+
+__EOBJC__
+
+require_relative '.libtests.rb'
